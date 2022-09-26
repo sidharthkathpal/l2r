@@ -1,3 +1,11 @@
+# ========================================================================= #
+# Filename:                                                                 #
+#    tracker.py                                                             #
+#                                                                           #
+# Description:                                                              #
+#    Tracks the vehicle and evaluates metrics on the path taken             #
+# ========================================================================= #
+
 import logging
 import time
 from typing import Dict
@@ -6,6 +14,7 @@ from typing import List
 import numpy as np
 
 from l2r.utils.space import get_vehicle_corner_coordinates
+
 
 SEGMENTS_COMPLETE_NUM = 9
 A_BIG_NUMBER = 1000
@@ -46,8 +55,8 @@ class ProgressTracker(object):
     :param int not_moving_ct: maximum number of vehicle can be stationary before
       being considered stuck
     :param boolean debug: debugging print statement flag
-    :param int n_segments: the number of segments into which to divide the track
-      (for segmentwise eval)
+    :param int n_eval_laps: number of laps required for complete evaluations
+    :param int n_segments: the number of segments into which to divide the track (for segmentwise eval)
     :param list segment_idxs: the centerline track ids of the segment boundaries
     :param scipy.spatial.KDTree segment_tree: kdtree projection of the segment
       boundaries (used to sense boundary crossings)
@@ -93,21 +102,25 @@ class ProgressTracker(object):
         self.respawns = 0
         self.laps_completed = 0
         self.num_infractions = 0
-        self.eval_mode, self.train_mode = eval_mode, not eval_mode
-
+        self.eval_mode = eval_mode
         self.n_segments = n_segments
-        self.current_segment = SEGM_RESET
-        self.last_segment = 1
-        self.segment_crossings = 0
-        self.segment_crossing_flag = [False] * self.n_segments
-        self.last_segment_dist = A_BIG_NUMBER
-        self.segment_success = [0] * self.n_segments
-        self.segment_success_final = [0] * self.n_segments
         self.segment_idxs = segment_idxs
-        self.segment_coords = self.get_segment_coords(
-            self.centerline, self.segment_idxs
-        )
+        self.segment_coords = self.get_segment_coords(self.centerline, self.segment_idxs)
         self.segment_tree = segment_tree
+        self.last_segment_dist = A_BIG_NUMBER
+        if self.eval_mode:
+            self.current_segment = 0
+            self.segment_success = [0] * self.n_segments
+            self.segment_success_final = [0]*self.n_segments
+            self.segment_tree = segment_tree        
+        else:
+            self.current_segment = SEGM_RESET
+            self.last_segment = 1
+            self.segment_crossings = 0
+            self.segment_crossing_flag = [False] * self.n_segments
+            self.last_segment_dist = A_BIG_NUMBER
+            self.segment_success = [0] * self.n_segments
+            self.segment_success_final = [0] * self.n_segments
 
     def reset(self, start_idx, segmentwise=False):
         """Reset the tracker for the next episode.
@@ -167,22 +180,18 @@ class ProgressTracker(object):
         idx += self.n_indices if idx < 0 else 0
 
         # validate vehicle isn't just oscillating near the starting point
-        # set halfway flag, if necessary
         if self.last_idx <= self.halfway_idx and idx >= self.halfway_idx:
             self.halfway_flag = True
 
         self._store(e, n, u, idx, yaw, c_dist, dt, ac, bp, n_out)
 
-        """
-        self.last_segment = self.current_segment
-        self.current_segment = self.monitor_segment_progression(
-            [idx, self.absolute_idx]
-        )
+        # set halfway flag, if necessary
+        if self.eval_mode:
+            self.current_segment = self.monitor_segment_progression([idx, self.absolute_idx])
 
-        if self.check_lap_completion(idx, now):
+        if self.check_lap_completion(idx, now) and self.eval_mode:
             self.segment_success_final = self.segment_success
             self.segment_success = [0] * self.n_segments
-        """
 
         self.ep_step_ct += 1
         self.last_update_time = now
@@ -211,7 +220,9 @@ class ProgressTracker(object):
 
         shifted_idx, absolute_idx = idxs
 
-        # closest_border_shft = self.segment_tree.query([shifted_idx])
+        self.last_segment = self.current_segment
+    
+        closest_border_shft = self.segment_tree.query([shifted_idx])
         closest_border_abs = self.segment_tree.query([absolute_idx])
         logging.info(f"[Tracker] Track index: {absolute_idx}")
         logging.info(f"[Tracker] Current segment: {self.current_segment}")
@@ -246,14 +257,20 @@ class ProgressTracker(object):
 
         self.last_segment_dist = closest_border_abs[0]
 
-        # if current_segment > SEGM_RESET+1:
-        #    self.segment_success[current_segment-2] = (
-        #        True if self.segment_success[current_segment-2] is not False else False
-        #    )
+        if current_segment >= 10 and self.last_segment <= 1: 
+            # wrong way
+            self.wrong_way = True
+            return current_segment
 
-        logging.info(f"[Tracker] Segment success: {self.segment_success}")
+        if current_segment >= 2:
 
+            self.segment_success[current_segment-2] = (
+                True if self.segment_success[current_segment-2] is not False else False
+            )
+        
         if self.eval_mode:
+            logging.info(f"[Tracker] Segment success: {self.segment_success}")
+
             logging.info(f"[Tracker] Crossed halfway point: {self.halfway_flag}\n")
 
         return current_segment
